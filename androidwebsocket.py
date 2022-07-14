@@ -21,8 +21,8 @@ class MobileSensorReceiver:
 
         self.Acc_sensor_bias = np.zeros((1, 3), dtype = np.float64)
         self.Acc_sensor_stddev = np.zeros((1, 3), dtype = np.float64)
-        self.Acc_cal_buffer = np.zeros((5000, 4), dtype = np.float64)
-        self.Acc_median7_filter_buffer = np.zeros((7, 3), dtype = np.float64)
+        self.Acc_cal_buffer = np.zeros((10000, 4), dtype = np.float64)
+        self.Acc_median7_filter_buffer = np.zeros((5, 3), dtype = np.float64)
 
         self.ws = websocket.WebSocketApp("ws://192.168.41.17:8081/sensor/connect?type=android.sensor.accelerometer",
                                             on_open=self.__on_acc_open,
@@ -41,6 +41,7 @@ class MobileSensorReceiver:
         self.debug_raw_data = np.zeros((500,3), dtype=np.float64)
         self.debug_curr_data = np.zeros((500, 3), dtype=np.float64)
         self.debug_median_filtered_data = np.zeros((500, 3), dtype=np.float64)
+        self.gui_text = ""
 
     def start(self):
         wst = threading.Thread(target=self.ws.run_forever)
@@ -50,14 +51,14 @@ class MobileSensorReceiver:
     def acc_median7_filter_init(self):
         #fills the last 7 data from the calibration to initialize the filter
         #data in the calibration buffer is median filtered raw data, so sensor bias needs to be substracted
-        self.Acc_median7_filter_buffer = self.Acc_cal_buffer[-8:-1, 0:3] - self.Acc_sensor_bias
+        self.Acc_median7_filter_buffer = self.Acc_cal_buffer[-6:-1, 0:3] - self.Acc_sensor_bias
 
     def acc_median7_filter(self, AccXYZ_curr):
         #roll the data over rows, move the first data to the end of the array 
         self.Acc_median7_filter_buffer = np.roll(self.Acc_median7_filter_buffer, -1, axis=0)
         
         #update the last element of the array with the new data
-        self.Acc_median7_filter_buffer[6] = AccXYZ_curr
+        self.Acc_median7_filter_buffer[4] = AccXYZ_curr
 
         median = np.median(self.Acc_median7_filter_buffer, axis=0)
         return median
@@ -97,8 +98,9 @@ class MobileSensorReceiver:
     def calibrate_acc_sensor(self, values, data_timestamp):
         self.Acc_cal_buffer[self.acc_cal_data_cnt] = [values[0], values[1], values[2], data_timestamp]
         self.acc_cal_data_cnt += 1
+        self.gui_text = "Calibrating"
 
-        if(self.acc_cal_data_cnt >= 5000): #1000 samples 2sn
+        if(self.acc_cal_data_cnt >= 10000): #1000 samples 2sn
             
             #sliding median filter (7th order) is applied on raw data to get rid of the spikes. 
             medX = signal.medfilt(self.Acc_cal_buffer[:, 0], kernel_size=7)
@@ -110,7 +112,8 @@ class MobileSensorReceiver:
             self.Acc_sensor_stddev[0] = [np.std(medX, dtype = np.float64), np.std(medY, dtype = np.float64), np.std(medZ, dtype = np.float64)]
             
             #np.savetxt('Acc_cal_buffer.csv', self.Acc_cal_buffer, delimiter=',')
-            print("Calibration completed: ", self.Acc_sensor_bias, self.Acc_sensor_stddev)
+            self.gui_text = "Calibration completed"
+            print("Calibration values: ", self.Acc_sensor_bias, self.Acc_sensor_stddev)
             #plt.plot(self.Acc_cal_buffer[:,3], self.Acc_cal_buffer[:,0])
             #plt.plot(self.Acc_cal_buffer[:,3])
             #plt.show()
@@ -140,6 +143,8 @@ class MobileSensorReceiver:
         self.Acc_curr[0] = Acc_median_filtered
 
         #calculate the position and velocity by numerical integration
+
+        #if ( abs(self.Acc_curr[0,0] - self.Acc_prev[0,0]) > (self.Acc_sensor_stddev[0,0])):
         self.calculate_velocity(data_timestamp)
         self.calculate_position(data_timestamp)
         
@@ -149,7 +154,7 @@ class MobileSensorReceiver:
         #print the calculated values in 1 hz
         self.print_data_cnt += 1
         if(self.print_data_cnt >= 500):
-            #print("Calculating...")
+            self.gui_text = "Processing.."
             self.print_data_cnt = 0
   
     def __on_acc_message(self, ws, message):
@@ -160,6 +165,13 @@ class MobileSensorReceiver:
                 self.calibrate_acc_sensor(values, data_timestamp)
             else:
                 self.process_acc_data(values, data_timestamp)
+
+def draw_acc_debug_text(screen, mobile_sensor_rec):
+    font = pg.font.SysFont(None, 24)
+
+    # now print the text
+    text_surface = font.render(mobile_sensor_rec.gui_text, True, (255, 255, 255))
+    screen.blit(text_surface,(20,470))
 
 def draw_acc_calculations(screen, mobile_sensor_rec):
     white=(255, 255, 255)
@@ -194,6 +206,7 @@ def process_user_input(events):
 
 if __name__ == "__main__":  
     pg.init()
+    pg.font.init()
     screen = pg.display.set_mode([500, 500])
     pg.display.set_caption("Indoor positioning App")
 
@@ -207,6 +220,7 @@ if __name__ == "__main__":
         
         screen.fill((0,0,0))
         draw_acc_calculations(screen, mobile_sensor_rec)
+        draw_acc_debug_text(screen, mobile_sensor_rec)
         
         # Flip the display
         pg.display.flip()
