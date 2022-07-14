@@ -21,8 +21,9 @@ class MobileSensorReceiver:
 
         self.Acc_sensor_bias = np.zeros((1, 3), dtype = np.float64)
         self.Acc_sensor_stddev = np.zeros((1, 3), dtype = np.float64)
-        self.Acc_cal_buffer = np.zeros((10000, 4), dtype = np.float64)
-        self.Acc_median7_filter_buffer = np.zeros((5, 3), dtype = np.float64)
+        self.Acc_cal_buffer = np.zeros((1000, 4), dtype = np.float64)
+        self.Acc_median5_filter_buffer = np.zeros((5, 3), dtype = np.float64)
+        self.Acc_lowpass_filter_buffer = np.zeros((5, 3), dtype = np.float64)
 
         self.ws = websocket.WebSocketApp("ws://192.168.41.17:8081/sensor/connect?type=android.sensor.accelerometer",
                                             on_open=self.__on_acc_open,
@@ -37,30 +38,49 @@ class MobileSensorReceiver:
         self.is_acc_calibrated = False
         self.nanosecs2secs_coef = 1. / 1000000000
         self.print_data_cnt = 0
+        self.gui_text = ""
+        self.lpf_coeffs = np.ones((1,25), dtype=np.float64)
 
         self.debug_raw_data = np.zeros((500,3), dtype=np.float64)
         self.debug_curr_data = np.zeros((500, 3), dtype=np.float64)
         self.debug_median_filtered_data = np.zeros((500, 3), dtype=np.float64)
-        self.gui_text = ""
+        self.debug_lpf_filtered_data = np.zeros((500, 3), dtype=np.float64)
+        
+    def acc_lowpass_filter_init(self):
+        #fills the last 3 data from the calibration to initialize the filter
+        #data in the calibration buffer is median filtered raw data, so sensor bias needs to be substracted
+        self.Acc_lowpass_filter_buffer = self.Acc_cal_buffer[-6:-1, 0:3] - self.Acc_sensor_bias
+        self.Acc_low_pass_write_index = 0
+
+    def acc_lowpass_filter(self, acc_vector):
+        self.Acc_lowpass_filter_buffer[self.Acc_low_pass_write_index] = acc_vector
+        mean = np.mean(self.Acc_lowpass_filter_buffer, axis=0, dtype=np.float64)
+
+        # use as circular buffer for optimum speed
+        self.Acc_low_pass_write_index += 1
+        if (self.Acc_low_pass_write_index >= 5):
+            self.Acc_low_pass_write_index = 0
+        
+        return mean
 
     def start(self):
         wst = threading.Thread(target=self.ws.run_forever)
         wst.daemon = True
         wst.start()
 
-    def acc_median7_filter_init(self):
-        #fills the last 7 data from the calibration to initialize the filter
+    def acc_median5_filter_init(self):
+        #fills the last 5 data from the calibration to initialize the filter
         #data in the calibration buffer is median filtered raw data, so sensor bias needs to be substracted
-        self.Acc_median7_filter_buffer = self.Acc_cal_buffer[-6:-1, 0:3] - self.Acc_sensor_bias
+        self.Acc_median5_filter_buffer = self.Acc_cal_buffer[-6:-1, 0:3] - self.Acc_sensor_bias
 
-    def acc_median7_filter(self, AccXYZ_curr):
+    def acc_median5_filter(self, value):
         #roll the data over rows, move the first data to the end of the array 
-        self.Acc_median7_filter_buffer = np.roll(self.Acc_median7_filter_buffer, -1, axis=0)
+        self.Acc_median5_filter_buffer = np.roll(self.Acc_median5_filter_buffer, -1, axis=0)
         
         #update the last element of the array with the new data
-        self.Acc_median7_filter_buffer[4] = AccXYZ_curr
+        self.Acc_median5_filter_buffer[-1] = value
 
-        median = np.median(self.Acc_median7_filter_buffer, axis=0)
+        median = np.median(self.Acc_median5_filter_buffer, axis=0)
         return median
 
     
@@ -74,7 +94,6 @@ class MobileSensorReceiver:
         self.Vel_prev = self.Vel_curr  
         self.prev_vel_update_timestamp = data_timestamp
         
-
     def calculate_position(self, data_timestamp):
         time_diff_s = (data_timestamp - self.prev_pos_update_timestamp) * self.nanosecs2secs_coef
         
@@ -86,21 +105,23 @@ class MobileSensorReceiver:
         self.prev_pos_update_timestamp = data_timestamp
 
     def __on_acc_error(self, error, e):
-        print("error occurred")
-        print(e)
+        self.gui_text = "Error occured" + str(e)
+        print(self.gui_text)
 
     def __on_acc_close(self, ws, a, b):
-        print("connection close")
+        self.gui_text = "Connection closed"
+        print(self.gui_text)
 
     def __on_acc_open(self, ws):
-        print("connection open")
+        self.gui_text = "Connection opened"
+        print(self.gui_text)
 
     def calibrate_acc_sensor(self, values, data_timestamp):
         self.Acc_cal_buffer[self.acc_cal_data_cnt] = [values[0], values[1], values[2], data_timestamp]
         self.acc_cal_data_cnt += 1
         self.gui_text = "Calibrating"
 
-        if(self.acc_cal_data_cnt >= 10000): #1000 samples 2sn
+        if(self.acc_cal_data_cnt >= 1000): #1000 samples 2sn
             
             #sliding median filter (7th order) is applied on raw data to get rid of the spikes. 
             medX = signal.medfilt(self.Acc_cal_buffer[:, 0], kernel_size=7)
@@ -118,7 +139,8 @@ class MobileSensorReceiver:
             #plt.plot(self.Acc_cal_buffer[:,3])
             #plt.show()
             
-            self.acc_median7_filter_init()
+            self.acc_median5_filter_init()
+            self.acc_lowpass_filter_init()
 
             self.prev_acc_update_timestamp = self.Acc_cal_buffer[-1, 3] # init the previous reading timestamp from the last calibration data reading time
             self.prev_vel_update_timestamp = self.prev_acc_update_timestamp
@@ -134,17 +156,19 @@ class MobileSensorReceiver:
         #rectify the raw acc reading with substracting the bias
         Acc_bias_corrected = Acc_read_raw - self.Acc_sensor_bias
         #self.debug_curr_data = np.roll(self.debug_curr_data, -1, axis=0)
-        #self.debug_curr_data[499] = Acc_bias_corrected
+        #self.debug_curr_data[-1] = Acc_bias_corrected
 
-        Acc_median_filtered = self.acc_median7_filter(Acc_bias_corrected)
+        Acc_median_filtered = self.acc_median5_filter(Acc_bias_corrected)
         #self.debug_median_filtered_data = np.roll(self.debug_median_filtered_data, -1, axis=0)
-        #self.debug_median_filtered_data[499] = Acc_median_filtered
+        #self.debug_median_filtered_data[-1] = Acc_median_filtered
 
-        self.Acc_curr[0] = Acc_median_filtered
+        Acc_lpf_filtered = self.acc_lowpass_filter(Acc_median_filtered)
+        #self.debug_lpf_filtered_data = np.roll(self.debug_lpf_filtered_data, -1, axis=0)
+        #self.debug_lpf_filtered_data[-1] = Acc_lpf_filtered
+
+        self.Acc_curr[0] = Acc_lpf_filtered #Acc_lpf_filtered
 
         #calculate the position and velocity by numerical integration
-
-        #if ( abs(self.Acc_curr[0,0] - self.Acc_prev[0,0]) > (self.Acc_sensor_stddev[0,0])):
         self.calculate_velocity(data_timestamp)
         self.calculate_position(data_timestamp)
         
