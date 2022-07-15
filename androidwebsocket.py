@@ -11,19 +11,10 @@ import pygame as pg
 #max acc read rate 2ms, 500Hz
 class MobileSensorReceiver:
     def __init__(self):
-        self.Acc_prev = np.zeros((1, 3), dtype = np.float64)
-        self.Vel_prev = np.zeros((1, 3), dtype = np.float64)
-        self.Pos_prev = np.zeros((1, 3), dtype = np.float64)
-
-        self.Acc_curr = np.zeros((1, 3), dtype = np.float64)
-        self.Vel_curr = np.zeros((1, 3), dtype = np.float64)
-        self.Pos_curr = np.zeros((1, 3), dtype = np.float64)
-
         self.Acc_sensor_bias = np.zeros((1, 3), dtype = np.float64)
         self.Acc_sensor_stddev = np.zeros((1, 3), dtype = np.float64)
-        self.Acc_cal_buffer = np.zeros((1000, 4), dtype = np.float64)
-        self.Acc_median5_filter_buffer = np.zeros((5, 3), dtype = np.float64)
-        self.Acc_lowpass_filter_buffer = np.zeros((5, 3), dtype = np.float64)
+        self.Acc_cal_buffer = np.zeros((2000, 4), dtype = np.float64)
+
 
         self.ws = websocket.WebSocketApp("ws://192.168.41.17:8081/sensor/connect?type=android.sensor.accelerometer",
                                             on_open=self.__on_acc_open,
@@ -31,79 +22,115 @@ class MobileSensorReceiver:
                                             on_error=self.__on_acc_error,
                                             on_close=self.__on_acc_close)
 
-        self.prev_acc_update_timestamp = 0
-        self.prev_vel_update_timestamp = 0
-        self.prev_pos_update_timestamp = 0
         self.acc_cal_data_cnt = 0
         self.is_acc_calibrated = False
         self.nanosecs2secs_coef = 1. / 1000000000
         self.print_data_cnt = 0
         self.gui_text = ""
-        self.lpf_coeffs = np.ones((1,25), dtype=np.float64)
 
-        self.debug_raw_data = np.zeros((500,3), dtype=np.float64)
-        self.debug_curr_data = np.zeros((500, 3), dtype=np.float64)
-        self.debug_median_filtered_data = np.zeros((500, 3), dtype=np.float64)
-        self.debug_lpf_filtered_data = np.zeros((500, 3), dtype=np.float64)
+        #new algoritm variables
+        self.AccX = 0.
+        self.VelX = 0.
+        self.PosX = 0.
+        self.acc_cum_x = 0.
+        self.acc_data_cnt = 0
+        self.acc_prev_x = 0.
+        self.vel_prev_x = 0.
+        self.pos_prev_x = 0.
+        self.acc_zero_cnt = 0
+
+ 
+    def process_acc_data(self, acc_read_x, acc_read_y, acc_read_z):
+        # Sampling freq is 500Hz periodic
+        # function developed considered the performance
+
+        if (self.acc_data_cnt < 15):
+            self.acc_cum_x = self.acc_cum_x + acc_read_x;
+            self.acc_data_cnt += 1
+            return
+
         
-    def acc_lowpass_filter_init(self):
-        #fills the last 3 data from the calibration to initialize the filter
-        #data in the calibration buffer is median filtered raw data, so sensor bias needs to be substracted
-        self.Acc_lowpass_filter_buffer = self.Acc_cal_buffer[-6:-1, 0:3] - self.Acc_sensor_bias
-        self.Acc_low_pass_write_index = 0
-
-    def acc_lowpass_filter(self, acc_vector):
-        self.Acc_lowpass_filter_buffer[self.Acc_low_pass_write_index] = acc_vector
-        mean = np.mean(self.Acc_lowpass_filter_buffer, axis=0, dtype=np.float64)
-
-        # use as circular buffer for optimum speed
-        self.Acc_low_pass_write_index += 1
-        if (self.Acc_low_pass_write_index >= 5):
-            self.Acc_low_pass_write_index = 0
+        #10Hz loop
         
-        return mean
+        acc_x = self.acc_cum_x / 15.0  - self.Acc_sensor_bias[0, 0]
+        self.acc_data_cnt = 0
+        self.acc_cum_x = 0.0
 
+        if abs(acc_x) < 0.07:   #ignore the noise
+            acc_x = 0.0
+            self.acc_zero_cnt +=1
+        else:
+            self.acc_zero_cnt = 0
+
+
+        #first integration for the velocity applying trapezoid:
+        #dt = 2 * self.nanosecs2secs_coef, 0.5 * dt = self.nanosecs2secs_coef
+
+        vel_x = self.vel_prev_x + self.acc_prev_x + ((acc_x - self.acc_prev_x) * self.nanosecs2secs_coef);
+        
+        #second X integration applying trapezoid:
+        pos_x = self.pos_prev_x + self.vel_prev_x + ((vel_x - self.vel_prev_x) * self.nanosecs2secs_coef);
+
+        #update the prev values for the next loop
+        self.acc_prev_x = acc_x  
+        self.vel_prev_x = vel_x
+        self.pos_prev_x = pos_x
+
+
+        #if acc value is 0 for sometime, movement is finished
+        # set the velocity to zero
+        if (self.acc_zero_cnt >= 2):  #1s
+            vel_x = 0
+            self.vel_prev_x = 0
+            self.acc_zero_cnt = 0
+      
+
+        self.AccX = acc_x
+        self.VelX = vel_x
+        self.PosX = pos_x
+
+        #update the gui msg @ 1 hz
+        self.print_data_cnt += 1
+        if(self.print_data_cnt >= 10):
+            self.gui_text = "Processing.."
+            self.print_data_cnt = 0
+  
+    def __on_acc_message(self, ws, message):
+            values = json.loads(message)['values']
+            data_timestamp = json.loads(message)['timestamp']
+            
+            if(self.is_acc_calibrated == False):
+                self.calibrate_acc_sensor(values, data_timestamp)
+            else:
+                self.process_acc_data(values[0], values[1], values[2])
+
+    def calibrate_acc_sensor(self, values, data_timestamp):
+        self.Acc_cal_buffer[self.acc_cal_data_cnt] = [values[0], values[1], values[2], data_timestamp]
+        self.acc_cal_data_cnt += 1
+        self.gui_text = "Calibrating"
+
+        if(self.acc_cal_data_cnt == 2000): #1000 samples 2sn
+            
+            accX = self.Acc_cal_buffer[:, 0]
+            accY = self.Acc_cal_buffer[:, 1]
+            accZ = self.Acc_cal_buffer[:, 2]
+
+            #sensor offset and stddev calculation on median filtered data 
+            self.Acc_sensor_bias[0] = [np.mean(accX, dtype = np.float64), np.mean(accY, dtype = np.float64), np.mean(accZ, dtype = np.float64)]
+            self.Acc_sensor_stddev[0] = [np.std(accX, dtype = np.float64), np.std(accY, dtype = np.float64), np.std(accZ, dtype = np.float64)]
+            
+            #np.savetxt('Acc_cal_buffer.csv', self.Acc_cal_buffer, delimiter=',')
+            self.gui_text = "Calibration completed"
+            print("Calibration values: ", self.Acc_sensor_bias, self.Acc_sensor_stddev)
+   
+            self.acc_cal_data_cnt = 0
+            self.is_acc_calibrated = True
+    
     def start(self):
         wst = threading.Thread(target=self.ws.run_forever)
         wst.daemon = True
         wst.start()
-
-    def acc_median5_filter_init(self):
-        #fills the last 5 data from the calibration to initialize the filter
-        #data in the calibration buffer is median filtered raw data, so sensor bias needs to be substracted
-        self.Acc_median5_filter_buffer = self.Acc_cal_buffer[-6:-1, 0:3] - self.Acc_sensor_bias
-
-    def acc_median5_filter(self, value):
-        #roll the data over rows, move the first data to the end of the array 
-        self.Acc_median5_filter_buffer = np.roll(self.Acc_median5_filter_buffer, -1, axis=0)
-        
-        #update the last element of the array with the new data
-        self.Acc_median5_filter_buffer[-1] = value
-
-        median = np.median(self.Acc_median5_filter_buffer, axis=0)
-        return median
-
     
-    def calculate_velocity(self, data_timestamp):
-        time_diff_s = (data_timestamp - self.prev_acc_update_timestamp) * self.nanosecs2secs_coef
-        
-        #use the average accelaration for more accurate integration
-        self.Vel_curr = self.Vel_prev + (self.Acc_curr + self.Acc_prev) * 0.5 * time_diff_s
-        
-        #fill the values for the next cycle
-        self.Vel_prev = self.Vel_curr  
-        self.prev_vel_update_timestamp = data_timestamp
-        
-    def calculate_position(self, data_timestamp):
-        time_diff_s = (data_timestamp - self.prev_pos_update_timestamp) * self.nanosecs2secs_coef
-        
-        #use the average velocity for more accurate integration
-        self.Pos_curr = self.Pos_prev + (self.Vel_curr + self.Vel_prev) * 0.5 * time_diff_s
-        
-        #fill the values for the next cycle
-        self.Pos_prev = self.Pos_curr 
-        self.prev_pos_update_timestamp = data_timestamp
-
     def __on_acc_error(self, error, e):
         self.gui_text = "Error occured" + str(e)
         print(self.gui_text)
@@ -115,80 +142,6 @@ class MobileSensorReceiver:
     def __on_acc_open(self, ws):
         self.gui_text = "Connection opened"
         print(self.gui_text)
-
-    def calibrate_acc_sensor(self, values, data_timestamp):
-        self.Acc_cal_buffer[self.acc_cal_data_cnt] = [values[0], values[1], values[2], data_timestamp]
-        self.acc_cal_data_cnt += 1
-        self.gui_text = "Calibrating"
-
-        if(self.acc_cal_data_cnt >= 1000): #1000 samples 2sn
-            
-            #sliding median filter (7th order) is applied on raw data to get rid of the spikes. 
-            medX = signal.medfilt(self.Acc_cal_buffer[:, 0], kernel_size=7)
-            medY = signal.medfilt(self.Acc_cal_buffer[:, 1], kernel_size=7)
-            medZ = signal.medfilt(self.Acc_cal_buffer[:, 2], kernel_size=7)
-
-            #sensor offset and stddev calculation on median filtered data 
-            self.Acc_sensor_bias[0] = [np.mean(medX, dtype = np.float64), np.mean(medY, dtype = np.float64), np.mean(medZ, dtype = np.float64)]
-            self.Acc_sensor_stddev[0] = [np.std(medX, dtype = np.float64), np.std(medY, dtype = np.float64), np.std(medZ, dtype = np.float64)]
-            
-            #np.savetxt('Acc_cal_buffer.csv', self.Acc_cal_buffer, delimiter=',')
-            self.gui_text = "Calibration completed"
-            print("Calibration values: ", self.Acc_sensor_bias, self.Acc_sensor_stddev)
-            #plt.plot(self.Acc_cal_buffer[:,3], self.Acc_cal_buffer[:,0])
-            #plt.plot(self.Acc_cal_buffer[:,3])
-            #plt.show()
-            
-            self.acc_median5_filter_init()
-            self.acc_lowpass_filter_init()
-
-            self.prev_acc_update_timestamp = self.Acc_cal_buffer[-1, 3] # init the previous reading timestamp from the last calibration data reading time
-            self.prev_vel_update_timestamp = self.prev_acc_update_timestamp
-            self.prev_pos_update_timestamp = self.prev_acc_update_timestamp
-            self.acc_cal_data_cnt = 0
-            self.is_acc_calibrated = True
-    
-    def process_acc_data(self, values, data_timestamp):
-        Acc_read_raw = [values[0], values[1], values[2]]        
-        #self.debug_raw_data = np.roll(self.debug_raw_data, -1, axis=0)
-        #self.debug_raw_data[499] = Acc_read_raw
-
-        #rectify the raw acc reading with substracting the bias
-        Acc_bias_corrected = Acc_read_raw - self.Acc_sensor_bias
-        #self.debug_curr_data = np.roll(self.debug_curr_data, -1, axis=0)
-        #self.debug_curr_data[-1] = Acc_bias_corrected
-
-        Acc_median_filtered = self.acc_median5_filter(Acc_bias_corrected)
-        #self.debug_median_filtered_data = np.roll(self.debug_median_filtered_data, -1, axis=0)
-        #self.debug_median_filtered_data[-1] = Acc_median_filtered
-
-        Acc_lpf_filtered = self.acc_lowpass_filter(Acc_median_filtered)
-        #self.debug_lpf_filtered_data = np.roll(self.debug_lpf_filtered_data, -1, axis=0)
-        #self.debug_lpf_filtered_data[-1] = Acc_lpf_filtered
-
-        self.Acc_curr[0] = Acc_lpf_filtered #Acc_lpf_filtered
-
-        #calculate the position and velocity by numerical integration
-        self.calculate_velocity(data_timestamp)
-        self.calculate_position(data_timestamp)
-        
-        self.Acc_prev = self.Acc_curr
-        self.prev_acc_update_timestamp = data_timestamp
-
-        #print the calculated values in 1 hz
-        self.print_data_cnt += 1
-        if(self.print_data_cnt >= 500):
-            self.gui_text = "Processing.."
-            self.print_data_cnt = 0
-  
-    def __on_acc_message(self, ws, message):
-            values = json.loads(message)['values']
-            data_timestamp = json.loads(message)['timestamp']
-            
-            if(self.is_acc_calibrated == False):
-                self.calibrate_acc_sensor(values, data_timestamp)
-            else:
-                self.process_acc_data(values, data_timestamp)
 
 def draw_acc_debug_text(screen, mobile_sensor_rec):
     font = pg.font.SysFont(None, 24)
@@ -203,19 +156,19 @@ def draw_acc_calculations(screen, mobile_sensor_rec):
     green=(0, 255, 255)
     orange=(255, 100, 0)
 
-    pg.draw.line(screen, yellow, (250, 30), (250 + -1 * int(mobile_sensor_rec.Acc_curr[0, 0] * 100) , 30), 20) #Ax
-    pg.draw.line(screen, green, (250, 60), (250 + int(mobile_sensor_rec.Acc_curr[0, 1] * 100), 60), 20) #Ay
-    pg.draw.line(screen, orange, (250, 90), (250 + int(mobile_sensor_rec.Acc_curr[0, 2] * 100), 90), 20) #Az
+    pg.draw.line(screen, yellow, (250, 30), (250 + -1 * int(mobile_sensor_rec.AccX * 100) , 30), 20) #Ax
+    pg.draw.line(screen, green, (250, 60), (250 + -1 * int(mobile_sensor_rec.AccX) * 100, 60), 20) #Ay
+    pg.draw.line(screen, orange, (250, 90), (250 + -1 * int(mobile_sensor_rec.AccX) * 100, 90), 20) #Az
 
     #draw velocities
-    pg.draw.line(screen, white, (250, 150), (250 + int(mobile_sensor_rec.Vel_curr[0, 0] * 100) , 150), 20) #Vx
-    pg.draw.line(screen, orange, (250, 180), (250 + int(mobile_sensor_rec.Vel_curr[0, 1] * 100), 180), 20) #Vy
-    pg.draw.line(screen, yellow, (250, 210), (250 + int(mobile_sensor_rec.Vel_curr[0, 2] * 100), 210), 20) #Vz
+    pg.draw.line(screen, white, (250, 150), (250 +  int(mobile_sensor_rec.VelX * 100) , 150), 20) #Vx
+    pg.draw.line(screen, orange, (250, 180), (250 + int(mobile_sensor_rec.VelX * 100), 180), 20) #Vy
+    pg.draw.line(screen, yellow, (250, 210), (250 + int(mobile_sensor_rec.VelX * 100), 210), 20) #Vz
 
     #draw positions
-    pg.draw.line(screen, white, (250, 270), (250 + -1 * int(mobile_sensor_rec.Pos_curr[0, 0] * 100) , 270), 20) #Vx
-    pg.draw.line(screen, green, (250, 300), (250 + int(mobile_sensor_rec.Pos_curr[0, 1] * 100), 300), 20) #Vy
-    pg.draw.line(screen, orange, (250, 330), (250 + int(mobile_sensor_rec.Pos_curr[0, 2] * 100), 330), 20) #Vz
+    pg.draw.line(screen, white, (250, 270), (250 + int(mobile_sensor_rec.PosX * 10) , 270), 20) #Vx
+    pg.draw.line(screen, green, (250, 300), (250 + int(mobile_sensor_rec.PosX * 10), 300), 20) #Vy
+    pg.draw.line(screen, orange, (250, 330), (250 + int(mobile_sensor_rec.PosX * 10), 330), 20) #Vz
 
 def process_user_input(events):
     for event in events:
