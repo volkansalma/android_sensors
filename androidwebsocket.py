@@ -43,18 +43,18 @@ class MobileSensorReceiver:
     def process_acc_data(self, acc_read_x, acc_read_y, acc_read_z):
         # Sampling freq is 500Hz periodic
         # function developed considered the performance
-        if (self.acc_data_cnt < 10):
+        if (self.acc_data_cnt < 20):
             self.acc_cum_x = self.acc_cum_x + acc_read_x;
             self.acc_data_cnt += 1
             return
 
         
         #10Hz loop
-        acc_x = self.acc_cum_x / 10.0  - self.Acc_sensor_bias[0, 0]
+        acc_x = self.acc_cum_x / 20.0  - self.Acc_sensor_bias[0, 0]
         self.acc_data_cnt = 0
         self.acc_cum_x = 0.0
 
-        if abs(acc_x) < 0.03:   #ignore the noise
+        if abs(acc_x) < 0.025:   #ignore the noise
             acc_x = 0.0
             self.acc_zero_cnt +=1
         else:
@@ -78,7 +78,7 @@ class MobileSensorReceiver:
 
         #if acc value is 0 for sometime, movement is finished
         # set the velocity to zero
-        if (self.acc_zero_cnt >= 10):  #1s
+        if (self.acc_zero_cnt > 2):  #1s
             vel_x = 0
             self.vel_prev_x = 0
             self.acc_zero_cnt = 0
