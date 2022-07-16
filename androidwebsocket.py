@@ -24,7 +24,7 @@ class MobileSensorReceiver:
 
         self.acc_cal_data_cnt = 0
         self.is_acc_calibrated = False
-        self.nanosecs2secs_coef = 1. / 1000000000
+        self.nanosecs2secs_coef = 1. / 1.
         self.print_data_cnt = 0
         self.gui_text = ""
 
@@ -43,20 +43,18 @@ class MobileSensorReceiver:
     def process_acc_data(self, acc_read_x, acc_read_y, acc_read_z):
         # Sampling freq is 500Hz periodic
         # function developed considered the performance
-
-        if (self.acc_data_cnt < 15):
+        if (self.acc_data_cnt < 10):
             self.acc_cum_x = self.acc_cum_x + acc_read_x;
             self.acc_data_cnt += 1
             return
 
         
         #10Hz loop
-        
-        acc_x = self.acc_cum_x / 15.0  - self.Acc_sensor_bias[0, 0]
+        acc_x = self.acc_cum_x / 10.0  - self.Acc_sensor_bias[0, 0]
         self.acc_data_cnt = 0
         self.acc_cum_x = 0.0
 
-        if abs(acc_x) < 0.07:   #ignore the noise
+        if abs(acc_x) < 0.03:   #ignore the noise
             acc_x = 0.0
             self.acc_zero_cnt +=1
         else:
@@ -66,10 +64,11 @@ class MobileSensorReceiver:
         #first integration for the velocity applying trapezoid:
         #dt = 2 * self.nanosecs2secs_coef, 0.5 * dt = self.nanosecs2secs_coef
 
-        vel_x = self.vel_prev_x + self.acc_prev_x + ((acc_x - self.acc_prev_x) * self.nanosecs2secs_coef);
+        dt = 2 * self.nanosecs2secs_coef
+        vel_x = self.vel_prev_x + (self.acc_prev_x + ((acc_x - self.acc_prev_x) * 0.5)) * dt;
         
         #second X integration applying trapezoid:
-        pos_x = self.pos_prev_x + self.vel_prev_x + ((vel_x - self.vel_prev_x) * self.nanosecs2secs_coef);
+        pos_x = self.pos_prev_x + (self.vel_prev_x + ((vel_x - self.vel_prev_x) * 0.5)) * dt;
 
         #update the prev values for the next loop
         self.acc_prev_x = acc_x  
@@ -79,7 +78,7 @@ class MobileSensorReceiver:
 
         #if acc value is 0 for sometime, movement is finished
         # set the velocity to zero
-        if (self.acc_zero_cnt >= 2):  #1s
+        if (self.acc_zero_cnt >= 10):  #1s
             vel_x = 0
             self.vel_prev_x = 0
             self.acc_zero_cnt = 0
