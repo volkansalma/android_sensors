@@ -48,7 +48,6 @@ class MobileSensorReceiver:
         self.accx_zero_cnt = 0
         self.accy_zero_cnt = 0
 
- 
     def process_acc_data(self, acc_read_x, acc_read_y, acc_read_z):
         # Sampling freq is 500Hz periodic
         # function developed considered the performance
@@ -57,8 +56,7 @@ class MobileSensorReceiver:
             self.acc_cum_y = self.acc_cum_y + acc_read_y;
             self.acc_data_cnt += 1
             return
-
-        
+  
         #10Hz loop
         acc_x = self.acc_cum_x / 20.0  - self.Acc_sensor_bias[0, 0]
         acc_y = self.acc_cum_y / 20.0  - self.Acc_sensor_bias[0, 1]
